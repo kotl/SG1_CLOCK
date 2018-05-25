@@ -18,12 +18,23 @@ sometimes inverts seconds fade after dial sequence, resets itself after getting 
 
 #include <EEPROM.h>
 
+#define DEBUG_ENABLED
+
+// Please do not remove INFO_ENABLED, it's used for menu through serial port
+#define INFO_ENABLED
+
+#include "kiotl_debug.h"
+#include "kiotl_rtc.h"
+#include "kiotl_ota.h"
+
+#include "kiotl_defines.h"
+
 #define NUM_LEDS 60
 #define LED_DATA_PIN 3
-#define LED_BRIGHTNESS 25 //default brightness
+#define LED_BRIGHTNESS 100 //default brightness
 
-#define NUM_BUTTONS 1
-#define NUM_COLOURSETS 3
+#define NUM_BUTTONS 2
+#define NUM_COLOURSETS 2
 #define WH_MIN 2//wormhole min and max run times (Seconds)
 #define WH_MAX 5
 #define PRESS_SHORT 30//in milliseconds, for debouncing
@@ -55,7 +66,8 @@ class LedWrapper {
 
   void show() {
     for (int i=0;i<NUM_LEDS;i++) {
-      s->SetPixelColor(i, leds[i]);
+      int pixelIndex = (i+15)%NUM_LEDS;
+      s->SetPixelColor(pixelIndex, colorGamma.Correct(leds[i]));
     }
     s->Show();
   }
@@ -85,7 +97,7 @@ unsigned long buttonPressedTimer = 0;
 int buttonPressed = 200;
 boolean buttonPressedFlag = false;
 byte buttonPressedOrigValue = 0;
-int buttons[NUM_BUTTONS] = {D1};
+int buttons[NUM_BUTTONS] = {D1, D2};
 
 //struct colour
 typedef struct
@@ -106,14 +118,21 @@ typedef struct
 } colourProfile;
 
 colourProfile myColourProfiles[NUM_COLOURSETS];
+time_t t;
+time_t last_t;
 
 void setup()
 {
-  Serial.begin(9600);
+  EEPROM.begin(512);
+  DEBUG_STARTUP;
+  rtcReadAndAddClick();
+  ota.loadConfig();
+
   strip.Begin();
+  retriveBrightness();
   LEDS.setBrightness(LEDBrightness);
   testLEDStrip();
-  //retriveColours();
+  retriveColours();
   printMenu();
   //random seed
   pinMode(A0, INPUT);
@@ -132,17 +151,43 @@ void setup()
   pinMode(A0, OUTPUT);
   digitalWrite(A0, LOW);//fake gnd pin
   */
+
+  // ota.setAPMode(rtcShouldTryUpdateBasedOnRtc());
+  ota.setAPMode(false);
+  ota.begin();
 }
 
 void loop()
 {
-  checkButtons();
-  if (Serial.available() > 0)
-  {
-    doMenu(Serial.read());
+  ota.handle();
+  if (ota.timeSetFirstTime()) {
+    t = ota.getTime();
+    DEBUG(" Time set for the first time:\n %2d:%2d:%2d %2d %2d %4d", hour(t), minute(t), second(t), day(t), month(t), year(t));
+    rtcAllClicksCommitted();
   }
-  displayClock();
-  checkChime();//on the hour
+  if (ota.wifiConnectedFirstTime()) {
+    DEBUG("Connected first time");
+  }
+  if (ota.wifiError()) {
+    // Restart or try again.
+    rtcConditionalRestart();
+  }  
+  if (ota.timeSet()) {
+    last_t = t;
+    t = ota.getTime();
+    if (second(t) == second(last_t)) {
+      return;
+    }
+    // TODO: uncomment when physical buttons work: checkButtons();
+    if (Serial.available() > 0)
+    {
+      doMenu(Serial.read());
+    }
+    displayClock();
+    checkChime();//on the hour
+  } else {
+      testLEDStrip();
+  }
 }
 
 void checkButtons()
@@ -153,9 +198,7 @@ void checkButtons()
     {
       if(buttonPressedFlag == false)//if its first time press
       {
-        //Serial.print("Button ");
-        //Serial.print(i);
-        //Serial.println(" Pressed");
+        DEBUG("Button %d pressed", i);
         
         //log details and start time
         buttonPressedFlag = true;
@@ -164,22 +207,26 @@ void checkButtons()
         switch(i)
         {
           case 0: buttonPressedOrigValue = colourSet; break;
+          case 1: showSG(); break;
         }
       }
       else//(buttonPressedFlag == true)
       {//this means this button has been pressed before and is still being pressed
-        //Serial.print(i);
+        DEBUG("Button %d is being hold", i);
         unsigned long timeTemp = (millis()-buttonPressedTimer);//how long it was pressed for
         if(timeTemp < PRESS_SHORT)
         {
-          //Serial.println("INVALID");//do sod all          
+          DEBUG("INVALID");//do sod all          
         }
         else
         {
-          //Serial.print("ADVANCE");
+          DEBUG("ADVANCE");
           switch(i)
           {
-            case 0: /*Serial.println(" colour to "); Serial.println(buttonPressedOrigValue+1);*/ applyColourSet(buttonPressedOrigValue+1); break;
+            case 0: 
+                    DEBUG(" colour to %d", buttonPressedOrigValue+1);
+                    applyColourSet(buttonPressedOrigValue+1); 
+                    break;
           }
         }
       }
@@ -188,7 +235,7 @@ void checkButtons()
     {			
       if((buttonPressed == i) && (buttonPressedFlag == true))//if it WAS pressed
       {
-        //Serial.println("unpressed");
+        DEBUG("unpressed");
         buttonPressedFlag = false;
         digitalClockDisplay();//show new settings
       }
@@ -196,13 +243,9 @@ void checkButtons()
   }	
 }
 
-void checkChime()
-{
-  int sequence = random(0,6);
-  if (minute() == 0 && second() == 0)
-  {
-    now();//gets time now, forces resync
-    setSyncInterval(3600);//set sync time to every hour, eg every chime
+void showSG() {
+  DEBUG("Showing random SG seq");
+      int sequence = random(0,6);
     switch(sequence)
     {
       case 1: dial(); dialFailSparks(); break;
@@ -212,12 +255,21 @@ void checkChime()
       case 5: dialIn(); kawoosh(); wormhole(); wormholeUnstable(); break;
       default: dial(); dialFail(); break;
     }
+  LEDS.setBrightness(LEDBrightness);
+}
+
+void checkChime()
+{
+  if (minute(t) == 0 && second(t) == 0)
+  {
+    showSG();
   }
 }
 
 
 void displayClock()
 {
+  LEDS.setBrightness(LEDBrightness);
   //do LED clock output
   for(int i = 0; i < NUM_LEDS; i++)//blank it first
   {
@@ -229,22 +281,22 @@ void displayClock()
     leds[i*5] = CRGB(COLOUR_DOTS[0],COLOUR_DOTS[1],COLOUR_DOTS[2]);
   }
   
-  int myHour = hour()*5;
+  int myHour = hour(t)*5;
   
-  if (hour() >= 12)//make sure it works in the afternoon
-    myHour = (hour() - 12) * 5;
+  if (hour(t) >= 12)//make sure it works in the afternoon
+    myHour = (hour(t) - 12) * 5;
 
-  if(minute() >= (12*0)){/*do nothing*/}//increment an LED for every 12 mins through the hour
-  if(minute() >= (12*1)){myHour++;}
-  if(minute() >= (12*2)){myHour++;}
-  if(minute() >= (12*3)){myHour++;}
-  if(minute() >= (12*4)){myHour++;}
+  if(minute(t) >= (12*0)){/*do nothing*/}//increment an LED for every 12 mins through the hour
+  if(minute(t) >= (12*1)){myHour++;}
+  if(minute(t) >= (12*2)){myHour++;}
+  if(minute(t) >= (12*3)){myHour++;}
+  if(minute(t) >= (12*4)){myHour++;}
   
   int lastSecond;
-  if(second() == 0)
+  if(second(t) == 0)
     lastSecond = 59;
   else
-    lastSecond = second()-1;
+    lastSecond = second(t)-1;
 
   int myHourM2 = myHour-2;
   if(myHour == 0 || myHour == 1)
@@ -269,12 +321,12 @@ void displayClock()
   leds[myHourP1]   = CRGB(COLOUR_HOUR[0]/2,COLOUR_HOUR[1]/2,COLOUR_HOUR[2]/2);
   leds[myHourP2]   = CRGB(COLOUR_HOUR[0]/4,COLOUR_HOUR[1]/4,COLOUR_HOUR[2]/4);
   
-  int myMinM1 = minute()-1;
-  if(minute() == 0)
+  int myMinM1 = minute(t)-1;
+  if(minute(t) == 0)
     myMinM1 = 59;
   
-  int myMinP1 = minute()+1;
-  if(minute() == 59)
+  int myMinP1 = minute(t)+1;
+  if(minute(t) == 59)
     myMinP1 = 0;  
   
   //now blend mins in (half and half)
@@ -282,16 +334,15 @@ void displayClock()
   blend = (1.0/4.0); iblend = 1.0-blend;
   leds[myMinM1] = CRGB((COLOUR_MIN[0]*blend) + (leds[myMinM1].R*iblend),(COLOUR_MIN[1]*blend) + (leds[myMinM1].G*iblend),(COLOUR_MIN[2]*blend) + (leds[myMinM1].B*iblend));
   blend = (3.0/4.0); iblend = 1.0 - blend;
-  leds[minute()] = CRGB((COLOUR_MIN[0]*blend) + (leds[minute()].R*iblend),(COLOUR_MIN[1]*blend) + (leds[minute()].G*iblend),(COLOUR_MIN[2]*blend) + (leds[minute()].B*iblend));
+  leds[minute(t)] = CRGB((COLOUR_MIN[0]*blend) + (leds[minute(t)].R*iblend),(COLOUR_MIN[1]*blend) + (leds[minute(t)].G*iblend),(COLOUR_MIN[2]*blend) + (leds[minute(t)].B*iblend));
   blend = (1.0/4.0); iblend = 1.0 - blend;
   leds[myMinP1] = CRGB((COLOUR_MIN[0]*blend) + (leds[myMinP1].R*iblend),(COLOUR_MIN[1]*blend) + (leds[myMinP1].G*iblend),(COLOUR_MIN[2]*blend) + (leds[myMinP1].B*iblend));
 
   //now do seconds blending (smooth transitions over the top)
-  if((second() > currentSec) || ((second() == 0) && (currentSec == 59)))//if it has incrmented or reset
+  if((second(t) > currentSec) || ((second(t) == 0) && (currentSec == 59)))//if it has incrmented or reset
   {
     timerSec = millis();//log when it happened
-    currentSec = second();
-//    Serial.println(currentSec);//DEBUG
+    currentSec = second(t);
   }
 
   float prop = 0.0;//proportion will be between 0 and 1 for balance based on how far through the second we are
@@ -301,7 +352,7 @@ void displayClock()
   float iprop = 1.0-prop;
     
   //smooth seconds - blends OVER what is already there
-  leds[second()] = CRGB((COLOUR_SEC[0]*prop) + (leds[currentSec].R*iprop),
+  leds[second(t)] = CRGB((COLOUR_SEC[0]*prop) + (leds[currentSec].R*iprop),
                         (COLOUR_SEC[1]*prop) + (leds[currentSec].G*iprop),
                         (COLOUR_SEC[2]*prop) + (leds[currentSec].B*iprop));                      
   
@@ -318,6 +369,7 @@ void displayClock()
 void saveBrightness()
 {
   EEPROM.write(3, LEDBrightness);
+  EEPROM.commit();
 }
 
 void retriveBrightness()
@@ -336,6 +388,7 @@ void saveColours()
   EEPROM.write(10,COLOUR_SEC[0]);
   EEPROM.write(11,COLOUR_SEC[1]);
   EEPROM.write(12,COLOUR_SEC[2]);
+  EEPROM.commit();
 }
 
 void retriveColours()
@@ -356,18 +409,22 @@ void retriveColours()
 
 void printMenu()
 {
-  Serial.println(" -- Hopo's LED Clock -- ");
+  INFO(" -- Hopo's LED Clock -- ");
   digitalClockDisplay();
-  Serial.print(" Brightness: ");
-  if(LEDBrightness == 000)
-    Serial.println("AUTO");
-  else
-    Serial.println(LEDBrightness);
-  Serial.println(" - MENU - ");
-  Serial.println(" G = Get Settings");
-  Serial.println(" B = Set Brightness");
-  Serial.println(" C = Set Colours (RGB)");
-  Serial.println(" E = Set Easy Colours");
+  INFO(" Brightness: ");
+  if(LEDBrightness == 000) {
+    INFO("AUTO");
+  }
+  else {
+    INFO("Brightness: %d", LEDBrightness);
+  }
+  INFO(" - MENU - ");
+  INFO(" G  = Get Settings");
+  INFO(" B  = Set Brightness");
+  INFO(" C  = Set Colours (RGB)");
+  INFO(" E  = Set Easy Colours");
+  INFO(" O  = Color Set + 1 (button 1)");
+  INFO(" S = Show random Stargate effect (button 2)");
 }
 
 void doMenu(char selection)
@@ -375,31 +432,38 @@ void doMenu(char selection)
   switch(selection)
   {
     case 'G'://print time out
-	  digitalClockDisplay();
-          Serial.print(" Brightness: ");
-          Serial.println(LEDBrightness);
-	  break;
+	        digitalClockDisplay();
+          INFO(" Brightness: %d", LEDBrightness);
+	        break;
     case 'B'://set brightness menu
-	  setBrightnessMenu();
+	        setBrightnessMenu();
           printMenu();
-	  break;
+	        break;
     case 'C'://set colours menu
-	  setColoursMenu();
+	        setColoursMenu();
           printMenu();
-	  break;
+	        break;
     case 'E'://set Easy colours menu
-	  setEasyColoursMenu();
+          setEasyColoursMenu();
           printMenu();
-	  break;
+          break;
+    case 'S'://show stargate effect
+          showSG();
+          printMenu();
+          break;
+    case 'O'://color set +1
+          applyColourSet(colourSet+1);
+          printMenu();
+          break;
     default:
-	  Serial.println("Unknown command");
-	  break;
+	      INFO("Unknown command");
+	      break;
   }
 }
 
 void setBrightnessMenu()
 {
-  Serial.println("Enter Brightness (000-255) [000=Auto]");
+  INFO("Enter Brightness (000-255) [000=Auto]");
   LEDBrightness = get3DigitFromSerial();
   LEDS.setBrightness(LEDBrightness);
   saveBrightness();
@@ -407,25 +471,25 @@ void setBrightnessMenu()
 
 void setColoursMenu()
 {
-  Serial.println("Enter Hour Red Component (000-255)");
+  INFO("Enter Hour Red Component (000-255)");
     COLOUR_HOUR[0]  = get3DigitFromSerial();
-  Serial.println("Enter Hour Green Component (000-255)");  
+  INFO("Enter Hour Green Component (000-255)");  
     COLOUR_HOUR[1]  = get3DigitFromSerial();
-  Serial.println("Enter Hour Blue Component (000-255)");
+  INFO("Enter Hour Blue Component (000-255)");
     COLOUR_HOUR[2]  = get3DigitFromSerial();
   
-  Serial.println("Enter Minute Red Component (000-255)");  
+  INFO("Enter Minute Red Component (000-255)");  
     COLOUR_MIN[0]  = get3DigitFromSerial();
-  Serial.println("Enter Minute Green Component (000-255)");  
+  INFO("Enter Minute Green Component (000-255)");  
     COLOUR_MIN[1]  = get3DigitFromSerial();
-  Serial.println("Enter Minute Blue Component (000-255)");
+  INFO("Enter Minute Blue Component (000-255)");
     COLOUR_MIN[2]  = get3DigitFromSerial();
 
-  Serial.println("Enter Second Red Component (000-255)");  
+  INFO("Enter Second Red Component (000-255)");  
     COLOUR_SEC[0]  = get3DigitFromSerial();
-  Serial.println("Enter Second Green Component (000-255)");  
+  INFO("Enter Second Green Component (000-255)");  
     COLOUR_SEC[1]  = get3DigitFromSerial();
-  Serial.println("Enter Second Blue Component (000-255)");  
+  INFO("Enter Second Blue Component (000-255)");  
     COLOUR_SEC[2]  = get3DigitFromSerial();
 
   saveColours();
@@ -434,17 +498,17 @@ void setColoursMenu()
 void setEasyColoursMenu()
 {
   CRGB temp;
-  Serial.println("Enter Hour Colour (000-255)");
+  INFO("Enter Hour Colour (000-255)");
   temp = CRGB(Wheel(get3DigitFromSerial()));
   COLOUR_HOUR[0] = temp.R;
   COLOUR_HOUR[1] = temp.G;
   COLOUR_HOUR[2] = temp.B;
-  Serial.println("Enter Minute Colour (000-255)");
+  INFO("Enter Minute Colour (000-255)");
   temp = CRGB(Wheel(get3DigitFromSerial()));
   COLOUR_MIN[0] = temp.R;
   COLOUR_MIN[1] = temp.G;
   COLOUR_MIN[2] = temp.B;  
-  Serial.println("Enter Second Colour (000-255)");
+  INFO("Enter Second Colour (000-255)");
   temp = CRGB(Wheel(get3DigitFromSerial()));
   COLOUR_SEC[0] = temp.R;
   COLOUR_SEC[1] = temp.G;
@@ -457,27 +521,8 @@ void setEasyColoursMenu()
 void digitalClockDisplay()
 {
   // digital clock display of the time
-  Serial.print(" Time:  ");
-  Serial.print(hour());
-  printDigits(minute());
-  printDigits(second());
-  Serial.print(" ");
-  Serial.print(day());
-  Serial.print(" ");
-  Serial.print(month());
-  Serial.print(" ");
-  Serial.print(year()); 
-  Serial.println(); 
-  Serial.print(" Colour Set: ");
-  Serial.println(colourSet);
-}
-
-void printDigits(int digits){
-  // utility function for digital clock display: prints preceding colon and leading 0
-  Serial.print(":");
-  if(digits < 10)
-    Serial.print('0');
-  Serial.print(digits);
+  INFO(" Time: %2d:%2d:%2d %2d %2d %4d", hour(t), minute(t), second(t), day(t), month(t), year(t));
+  INFO(" Colour Set: %d", colourSet);
 }
 
 /*------------------------------------------- INPUT THINGS -------------------------------------------*/
@@ -538,6 +583,7 @@ void applyColourSet(int profile)
   COLOUR_BG[0] = myColourProfiles[profile].ColBg.r;
   COLOUR_BG[1] = myColourProfiles[profile].ColBg.g;
   COLOUR_BG[2] = myColourProfiles[profile].ColBg.b;
+  saveColours();
 }
 
 void setupColourProfiles()
@@ -553,9 +599,9 @@ void setupColourProfiles()
   myColourProfiles[0].ColSec.r = 064;
   myColourProfiles[0].ColSec.g = 000;
   myColourProfiles[0].ColSec.b = 255;
-  myColourProfiles[0].ColDots.r = 30;
-  myColourProfiles[0].ColDots.g = 30;
-  myColourProfiles[0].ColDots.b = 30;
+  myColourProfiles[0].ColDots.r = 60;
+  myColourProfiles[0].ColDots.g = 60;
+  myColourProfiles[0].ColDots.b = 60;
   myColourProfiles[0].ColBg.r = 000;
   myColourProfiles[0].ColBg.g = 000;
   myColourProfiles[0].ColBg.b = 000;
@@ -576,6 +622,7 @@ void setupColourProfiles()
   myColourProfiles[1].ColBg.g = 000;
   myColourProfiles[1].ColBg.b = 000;
   //fully dark
+  /*
   myColourProfiles[2].ColHour.r = 000;
   myColourProfiles[2].ColHour.g = 000;
   myColourProfiles[2].ColHour.b = 000;
@@ -590,7 +637,7 @@ void setupColourProfiles()
   myColourProfiles[2].ColDots.b = 000;
   myColourProfiles[2].ColBg.r = 000;
   myColourProfiles[2].ColBg.g = 000;
-  myColourProfiles[2].ColBg.b = 000;
+  myColourProfiles[2].ColBg.b = 000;*/
 }
 
 void dialFailSparks()
@@ -941,6 +988,7 @@ void sparkle(byte C0, byte C1, byte C2, int wait)
 
 void testLEDStrip()
 {
+  DEBUG("Testing strip");
   LEDS.setBrightness(23);
   for(int whiteLed = 0; whiteLed < NUM_LEDS; whiteLed = whiteLed + 1)
   {
