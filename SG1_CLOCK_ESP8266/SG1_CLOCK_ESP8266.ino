@@ -6,23 +6,64 @@ sometimes inverts seconds fade after dial sequence, resets itself after getting 
 
 */
 
-#include <Time.h>  
-#include <Wire.h>  
-#include <DS1307RTC.h>
+#include <NeoPixelBrightnessBus.h>
+#include <NeoPixelAnimator.h>
+
+#include <Time.h>
+#include <TimeLib.h>
+
+#include <ESP8266WiFi.h>
+#include <time.h>
+#include "FS.h"
+
 #include <EEPROM.h>
-#include "FastLED.h"
 
 #define NUM_LEDS 60
 #define LED_DATA_PIN 3
 #define LED_BRIGHTNESS 25 //default brightness
-#define LDR_PIN A7
-#define NUM_BUTTONS 3
+
+#define NUM_BUTTONS 1
 #define NUM_COLOURSETS 3
 #define WH_MIN 2//wormhole min and max run times (Seconds)
 #define WH_MAX 5
 #define PRESS_SHORT 30//in milliseconds, for debouncing
 
+NeoGamma<NeoGammaTableMethod> colorGamma; // for any fade animations, best to correct gamma
+#define CRGB RgbColor
+#define FastLED LEDS
+
 CRGB leds[NUM_LEDS];
+
+class LedWrapper {
+  NeoPixelBrightnessBus<NeoGrbFeature, NeoEsp8266Uart800KbpsMethod> * s;
+  CRGB* l;
+
+  public:
+  LedWrapper(NeoPixelBrightnessBus<NeoGrbFeature, NeoEsp8266Uart800KbpsMethod>* s,
+    CRGB* l ) {
+      this->s = s;
+      this->l = l;
+    }
+
+  void setBrightness(uint8_t brightness) {
+    s->SetBrightness(brightness);
+  }
+
+  uint8_t getBrightness() {
+    return s->GetBrightness();
+  }
+
+  void show() {
+    for (int i=0;i<NUM_LEDS;i++) {
+      s->SetPixelColor(i, leds[i]);
+    }
+    s->Show();
+  }
+};
+
+NeoPixelBrightnessBus<NeoGrbFeature, NeoEsp8266Uart800KbpsMethod> strip(NUM_LEDS, LED_DATA_PIN);
+
+LedWrapper LEDS(&strip, leds);
 
 unsigned long timerSec = 0;
 int currentSec = 0;
@@ -44,7 +85,7 @@ unsigned long buttonPressedTimer = 0;
 int buttonPressed = 200;
 boolean buttonPressedFlag = false;
 byte buttonPressedOrigValue = 0;
-int buttons[NUM_BUTTONS] = {4,5,6};
+int buttons[NUM_BUTTONS] = {D1};
 
 //struct colour
 typedef struct
@@ -69,28 +110,19 @@ colourProfile myColourProfiles[NUM_COLOURSETS];
 void setup()
 {
   Serial.begin(9600);
-  setSyncProvider(RTC.get);   // the function to get the time from the RTC, gets time now
-  setSyncInterval(3600);  //default is 300 secs (5 mins), set to 1 hour
-  
-  if(timeStatus()!= timeSet) 
-     Serial.println("Unable to sync with the RTC");
-  else
-     Serial.println("RTC has set the system time");      
-
-  FastLED.addLeds<NEOPIXEL, LED_DATA_PIN, GRB>(leds, NUM_LEDS);
+  strip.Begin();
   LEDS.setBrightness(LEDBrightness);
   testLEDStrip();
   //retriveColours();
   printMenu();
   //random seed
-  pinMode(A7, INPUT);
-  randomSeed(analogRead(7));
-  
+  pinMode(A0, INPUT);
+  randomSeed(analogRead(A0));
+
 //set up inputs
   for(int i = 0; i < NUM_BUTTONS; i++)
   {
     pinMode(buttons[i], INPUT);           // set pin to input
-    digitalWrite(buttons[i], HIGH);       // turn on pullup r
   }
   
   setupColourProfiles();
@@ -110,7 +142,6 @@ void loop()
     doMenu(Serial.read());
   }
   displayClock();
-  checkLight();
   checkChime();//on the hour
 }
 
@@ -132,9 +163,7 @@ void checkButtons()
         buttonPressed = i;
         switch(i)
         {
-          case 0: buttonPressedOrigValue = minute(); break;
-          case 1: buttonPressedOrigValue = hour(); break;
-          case 2: buttonPressedOrigValue = colourSet; break;
+          case 0: buttonPressedOrigValue = colourSet; break;
         }
       }
       else//(buttonPressedFlag == true)
@@ -150,9 +179,7 @@ void checkButtons()
           //Serial.print("ADVANCE");
           switch(i)
           {
-            case 0: /*Serial.print(" mins to ");     Serial.println(buttonPressedOrigValue+1);*/ updateMin(buttonPressedOrigValue+1); break;
-            case 1: /*Serial.print(" hours to ");    Serial.println(buttonPressedOrigValue+1);*/ updateHour(buttonPressedOrigValue+1); break;
-            case 2: /*Serial.println(" colour to "); Serial.println(buttonPressedOrigValue+1);*/ applyColourSet(buttonPressedOrigValue+1); break;
+            case 0: /*Serial.println(" colour to "); Serial.println(buttonPressedOrigValue+1);*/ applyColourSet(buttonPressedOrigValue+1); break;
           }
         }
       }
@@ -167,65 +194,6 @@ void checkButtons()
       }
     }
   }	
-}
-
-void updateMin(int myMin)
-{
-  if(myMin == 60)
-    myMin = 0;
-    
-  int timeDatArray[6] = {0,0,0,0,0,0};
-  timeDatArray[5] = year();
-  timeDatArray[4] = month();
-  timeDatArray[3] = day();
-  timeDatArray[0] = hour();
-  timeDatArray[1] = myMin;
-  timeDatArray[2] = second();
-
-  setTime(timeDatArray[0],
-          timeDatArray[1],
-          timeDatArray[2],
-          timeDatArray[3],
-          timeDatArray[4],
-          timeDatArray[5]);
-
-  time_t t = now();
-  RTC.set(t);
-}
-
-void updateHour(int myHour)
-{
-  int timeDatArray[6] = {0,0,0,0,0,0};
-  timeDatArray[5] = year();
-  timeDatArray[4] = month();
-  timeDatArray[3] = day();
-  timeDatArray[0] = myHour;
-  timeDatArray[1] = minute();;
-  timeDatArray[2] = second();
-
-  setTime(timeDatArray[0],
-          timeDatArray[1],
-          timeDatArray[2],
-          timeDatArray[3],
-          timeDatArray[4],
-          timeDatArray[5]);
-
-  time_t t = now();
-  RTC.set(t);  
-}
-
-void checkLight()
-{
-//  Serial.println(analogRead(LDR_PIN));
-  int reading = 0;
-  reading += analogRead(LDR_PIN);
-  reading += analogRead(LDR_PIN);
-  reading += analogRead(LDR_PIN);
-  reading += analogRead(LDR_PIN);
-  reading += analogRead(LDR_PIN);
-  reading = reading / 5;//average it         
-  int brightness = map(reading,0,1023,255,0);
-  LEDS.setBrightness(brightness);
 }
 
 void checkChime()
@@ -312,11 +280,11 @@ void displayClock()
   //now blend mins in (half and half)
   float blend,iblend;
   blend = (1.0/4.0); iblend = 1.0-blend;
-  leds[myMinM1] = CRGB((COLOUR_MIN[0]*blend) + (leds[myMinM1].r*iblend),(COLOUR_MIN[1]*blend) + (leds[myMinM1].g*iblend),(COLOUR_MIN[2]*blend) + (leds[myMinM1].b*iblend));
+  leds[myMinM1] = CRGB((COLOUR_MIN[0]*blend) + (leds[myMinM1].R*iblend),(COLOUR_MIN[1]*blend) + (leds[myMinM1].G*iblend),(COLOUR_MIN[2]*blend) + (leds[myMinM1].B*iblend));
   blend = (3.0/4.0); iblend = 1.0 - blend;
-  leds[minute()] = CRGB((COLOUR_MIN[0]*blend) + (leds[minute()].r*iblend),(COLOUR_MIN[1]*blend) + (leds[minute()].g*iblend),(COLOUR_MIN[2]*blend) + (leds[minute()].b*iblend));
+  leds[minute()] = CRGB((COLOUR_MIN[0]*blend) + (leds[minute()].R*iblend),(COLOUR_MIN[1]*blend) + (leds[minute()].G*iblend),(COLOUR_MIN[2]*blend) + (leds[minute()].B*iblend));
   blend = (1.0/4.0); iblend = 1.0 - blend;
-  leds[myMinP1] = CRGB((COLOUR_MIN[0]*blend) + (leds[myMinP1].r*iblend),(COLOUR_MIN[1]*blend) + (leds[myMinP1].g*iblend),(COLOUR_MIN[2]*blend) + (leds[myMinP1].b*iblend));
+  leds[myMinP1] = CRGB((COLOUR_MIN[0]*blend) + (leds[myMinP1].R*iblend),(COLOUR_MIN[1]*blend) + (leds[myMinP1].G*iblend),(COLOUR_MIN[2]*blend) + (leds[myMinP1].B*iblend));
 
   //now do seconds blending (smooth transitions over the top)
   if((second() > currentSec) || ((second() == 0) && (currentSec == 59)))//if it has incrmented or reset
@@ -333,13 +301,13 @@ void displayClock()
   float iprop = 1.0-prop;
     
   //smooth seconds - blends OVER what is already there
-  leds[second()] = CRGB((COLOUR_SEC[0]*prop) + (leds[currentSec].r*iprop),
-                        (COLOUR_SEC[1]*prop) + (leds[currentSec].g*iprop),
-                        (COLOUR_SEC[2]*prop) + (leds[currentSec].b*iprop));                      
+  leds[second()] = CRGB((COLOUR_SEC[0]*prop) + (leds[currentSec].R*iprop),
+                        (COLOUR_SEC[1]*prop) + (leds[currentSec].G*iprop),
+                        (COLOUR_SEC[2]*prop) + (leds[currentSec].B*iprop));                      
   
-  leds[lastSecond] = CRGB((COLOUR_SEC[0]*iprop) + (leds[lastSecond].r*prop),
-                          (COLOUR_SEC[1]*iprop) + (leds[lastSecond].g*prop),
-                          (COLOUR_SEC[2]*iprop) + (leds[lastSecond].b*prop));//the previous one
+  leds[lastSecond] = CRGB((COLOUR_SEC[0]*iprop) + (leds[lastSecond].R*prop),
+                          (COLOUR_SEC[1]*iprop) + (leds[lastSecond].G*prop),
+                          (COLOUR_SEC[2]*iprop) + (leds[lastSecond].B*prop));//the previous one
   
   FastLED.show();
 }
@@ -397,7 +365,6 @@ void printMenu()
     Serial.println(LEDBrightness);
   Serial.println(" - MENU - ");
   Serial.println(" G = Get Settings");
-  Serial.println(" S = Set Date/Time");
   Serial.println(" B = Set Brightness");
   Serial.println(" C = Set Colours (RGB)");
   Serial.println(" E = Set Easy Colours");
@@ -411,10 +378,6 @@ void doMenu(char selection)
 	  digitalClockDisplay();
           Serial.print(" Brightness: ");
           Serial.println(LEDBrightness);
-	  break;
-    case 'S'://set time menu
-	  setTimeMenu();
-          printMenu();
 	  break;
     case 'B'://set brightness menu
 	  setBrightnessMenu();
@@ -432,34 +395,6 @@ void doMenu(char selection)
 	  Serial.println("Unknown command");
 	  break;
   }
-}
-
-void setTimeMenu()
-{
-  int timeDatArray[6] = {0,0,0,0,0,0};
- 
-  Serial.println("Enter Year (YY)");
-  timeDatArray[5] = get2DigitFromSerial();
-  Serial.println("Enter Month (MM)");
-  timeDatArray[4] = get2DigitFromSerial();
-  Serial.println("Enter Day (DD)");
-  timeDatArray[3] = get2DigitFromSerial();
-  Serial.println("Enter Hour (hh)");
-  timeDatArray[0] = get2DigitFromSerial();
-  Serial.println("Enter Minute (mm)");
-  timeDatArray[1] = get2DigitFromSerial();
-  Serial.println("Enter Second (ss)");
-  timeDatArray[2] = get2DigitFromSerial();
-
-  setTime(timeDatArray[0],
-          timeDatArray[1],
-          timeDatArray[2],
-          timeDatArray[3],
-          timeDatArray[4],
-          timeDatArray[5]);
-
-  time_t t = now();
-  RTC.set(t);  
 }
 
 void setBrightnessMenu()
@@ -501,19 +436,19 @@ void setEasyColoursMenu()
   CRGB temp;
   Serial.println("Enter Hour Colour (000-255)");
   temp = CRGB(Wheel(get3DigitFromSerial()));
-  COLOUR_HOUR[0] = temp.r;
-  COLOUR_HOUR[1] = temp.g;
-  COLOUR_HOUR[2] = temp.b;
+  COLOUR_HOUR[0] = temp.R;
+  COLOUR_HOUR[1] = temp.G;
+  COLOUR_HOUR[2] = temp.B;
   Serial.println("Enter Minute Colour (000-255)");
   temp = CRGB(Wheel(get3DigitFromSerial()));
-  COLOUR_MIN[0] = temp.r;
-  COLOUR_MIN[1] = temp.g;
-  COLOUR_MIN[2] = temp.b;  
+  COLOUR_MIN[0] = temp.R;
+  COLOUR_MIN[1] = temp.G;
+  COLOUR_MIN[2] = temp.B;  
   Serial.println("Enter Second Colour (000-255)");
   temp = CRGB(Wheel(get3DigitFromSerial()));
-  COLOUR_SEC[0] = temp.r;
-  COLOUR_SEC[1] = temp.g;
-  COLOUR_SEC[2] = temp.b;
+  COLOUR_SEC[0] = temp.R;
+  COLOUR_SEC[1] = temp.G;
+  COLOUR_SEC[2] = temp.B;
   saveColours();
 }
 
@@ -764,7 +699,7 @@ void wormholeUnstable()
 	{
           for(int i = 0; i < NUM_LEDS; i++)//blank it first
           {
-            leds[i] = CRGB::Black;//but dont show yet
+            leds[i] = CRGB(0,0,0);//but dont show yet
           }
 	  FastLED.show();//show it
 	  delay(200);
@@ -777,7 +712,7 @@ void wormholeUnstable()
 	}
   }
   //hold black for a bit
-  leds[i] = CRGB::Black;//but dont show yet
+  leds[i] = CRGB(0,0,0);//but dont show yet
   FastLED.show();//show it
   delay(delayTime*50);
 }
@@ -914,7 +849,7 @@ void getChevronBG(int chevrons)
 {//set up a background with chevrons already lit
   for(int i = 0; i < NUM_LEDS; i++)//blank it first
   {
-    leds[i] = CRGB::Black;//but dont show yet
+    leds[i] = CRGB(0,0,0);//but dont show yet
   }
   //add chevrons for current state (correct order now)
   switch(chevrons)
@@ -965,7 +900,7 @@ void runSparkle(CRGB myColour, int wait, int times)
 {
   for(int i = 0; i < times; i++)
   {
-    sparkle(myColour.r,myColour.g ,myColour.b,wait);
+    sparkle(myColour.R,myColour.G ,myColour.B,wait);
   }
 }
   
@@ -973,7 +908,8 @@ void sparkle(byte C0, byte C1, byte C2, int wait)
 {
   for(int i = 0; i < NUM_LEDS; i++)//make a strips-worth of data
   {
-    byte whiteChance = random(0,256);
+    // never use 0 as start -> it can create division by zero.
+    byte whiteChance = random(1,256);
     byte FC0 = 0;
     byte FC1 = 0;
     byte FC2 = 0;
@@ -1008,10 +944,10 @@ void testLEDStrip()
   LEDS.setBrightness(23);
   for(int whiteLed = 0; whiteLed < NUM_LEDS; whiteLed = whiteLed + 1)
   {
-    leds[whiteLed] = CRGB::White;
+    leds[whiteLed] = CRGB(255,255,255);
     FastLED.show();
     delay(10);
-    leds[whiteLed] = CRGB::Black;
+    leds[whiteLed] = CRGB(0,0,0);
   }
   LEDS.setBrightness(LEDBrightness);//reset brightness
 }
