@@ -175,6 +175,7 @@ void loop()
   if (ota.timeSet()) {
     last_t = t;
     t = ota.getTime();
+    if (year(t) < 2018) return;
     checkButtons();
     if (Serial.available() > 0)
     {
