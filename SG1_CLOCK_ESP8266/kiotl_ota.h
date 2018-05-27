@@ -239,7 +239,7 @@ public:
     }
     bool res = WiFi.isConnected();
     if (res) {
-      configTime(_tz_seconds, 0, "time.nist.gov", "time.windows.com", "ca.pool.ntp.org");
+      configTime(_tz_seconds, 0, "ca.pool.ntp.org", "time.nist.gov", "time.windows.com");
       _connected = true; 
     }
     return res;

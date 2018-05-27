@@ -175,13 +175,13 @@ void loop()
   if (ota.timeSet()) {
     last_t = t;
     t = ota.getTime();
-    if (second(t) == second(last_t)) {
-      return;
-    }
-    // TODO: uncomment when physical buttons work: checkButtons();
+    checkButtons();
     if (Serial.available() > 0)
     {
       doMenu(Serial.read());
+    }
+    if (second(t) == second(last_t)) {
+      return;
     }
     displayClock();
     checkChime();//on the hour
@@ -207,7 +207,6 @@ void checkButtons()
         switch(i)
         {
           case 0: buttonPressedOrigValue = colourSet; break;
-          case 1: showSG(); break;
         }
       }
       else//(buttonPressedFlag == true)
@@ -227,6 +226,7 @@ void checkButtons()
                     DEBUG(" colour to %d", buttonPressedOrigValue+1);
                     applyColourSet(buttonPressedOrigValue+1); 
                     break;
+            case 1: showSG(); break;
           }
         }
       }
@@ -341,25 +341,25 @@ void displayClock()
   //now do seconds blending (smooth transitions over the top)
   if((second(t) > currentSec) || ((second(t) == 0) && (currentSec == 59)))//if it has incrmented or reset
   {
-    timerSec = millis();//log when it happened
+    // timerSec = millis();//log when it happened
     currentSec = second(t);
   }
 
   float prop = 0.0;//proportion will be between 0 and 1 for balance based on how far through the second we are
-  //prop = ((float)(millis()-timerSec));
-  //prop = prop / 1000.0;
+  /*
   prop = ((float)(millis()-timerSec)) / 1000.0;
+  */
   float iprop = 1.0-prop;
-    
+      
   //smooth seconds - blends OVER what is already there
   leds[second(t)] = CRGB((COLOUR_SEC[0]*prop) + (leds[currentSec].R*iprop),
                         (COLOUR_SEC[1]*prop) + (leds[currentSec].G*iprop),
                         (COLOUR_SEC[2]*prop) + (leds[currentSec].B*iprop));                      
-  
+
   leds[lastSecond] = CRGB((COLOUR_SEC[0]*iprop) + (leds[lastSecond].R*prop),
                           (COLOUR_SEC[1]*iprop) + (leds[lastSecond].G*prop),
                           (COLOUR_SEC[2]*iprop) + (leds[lastSecond].B*prop));//the previous one
-  
+                          
   FastLED.show();
 }
 
